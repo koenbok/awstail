@@ -15,7 +15,7 @@
  */
 import { cli } from "cleye";
 import { exit } from "node:process";
-import { createInterface } from "node:readline";
+import { createInterface, Interface } from "node:readline";
 import { stdin, stdout } from "node:process";
 import type {
 	FilterLogEventsCommandInput,
@@ -88,7 +88,7 @@ interface FilterState {
 
 class InteractiveFilter {
 	private filterState: FilterState = { pattern: "", isActive: false };
-	private readline: any;
+	private readline: Interface;
 
 	constructor() {
 		this.setupReadline();
@@ -167,12 +167,8 @@ class InteractiveFilter {
 			process.stdout.write(
 				`${colors.gray}${colors.dim}filter: ${this.filterState.pattern}${colors.reset}`,
 			);
-		} else {
-			const now = new Date().toLocaleTimeString("en-US", { hour12: false });
-			process.stdout.write(
-				`${colors.gray}${colors.dim}Last fetch at ${now}...${colors.reset}`,
-			);
 		}
+		// Don't show "Last fetch at" line anymore - it's too noisy
 	}
 
 	shouldDimLine(message: string): boolean {
@@ -186,7 +182,9 @@ class InteractiveFilter {
 
 	getDimmedLine(formatted: string): string {
 		// Apply super dim formatting - make it much less visible
-		return `${colors.gray}${colors.dim}${formatted.replace(/\x1b\[[0-9;]*m/g, "")}${colors.reset}`;
+		// Strip ANSI escape codes and apply dim formatting
+		const stripped = formatted.replace(/\u001b\[[0-9;]*m/g, "");
+		return `${colors.gray}${colors.dim}${stripped}${colors.reset}`;
 	}
 
 	getFilterPattern(): string {
@@ -420,20 +418,6 @@ async function* streamLogs(
 ) {
 	let currentStartTime = startTime;
 
-	// Show initial status line only if not using interactive filter
-	const updateStatusLine = () => {
-		if (!interactiveFilter) {
-			const now = new Date().toLocaleTimeString("en-US", { hour12: false });
-			process.stdout.write(
-				`\r${colors.gray}${colors.dim}Last fetch at ${now}...${colors.reset}`,
-			);
-		}
-	};
-
-	if (!interactiveFilter) {
-		updateStatusLine();
-	}
-
 	while (true) {
 		const params: FilterLogEventsCommandInput = {
 			logGroupName,
@@ -446,24 +430,10 @@ async function* streamLogs(
 		const { events } = await client.send(new FilterLogEventsCommand(params));
 
 		if (events?.length) {
-			if (!interactiveFilter) {
-				// Clear status line and show new logs (original behavior)
-				process.stdout.write("\r\x1b[K"); // Clear current line
-			}
-
-			// Update cursor before yielding to avoid missing records
 			currentStartTime = Math.max(...events.map((e) => e.timestamp ?? 0)) + 1;
 			for (const event of events) {
 				yield event;
 			}
-
-			if (!interactiveFilter) {
-				// Show status line again after logs (original behavior)
-				updateStatusLine();
-			}
-		} else if (!interactiveFilter) {
-			// Just update the timestamp (original behavior)
-			updateStatusLine();
 		}
 
 		await new Promise((r) => setTimeout(r, pollMs));
@@ -545,14 +515,6 @@ async function main() {
 				? Math.max(...initialEvents.map((e) => e.timestamp ?? 0)) + 1
 				: Date.now();
 
-		// Show initial status line
-		if (interactiveFilter) {
-			console.log(); // Add a blank line
-			process.stdout.write(
-				`${colors.gray}${colors.dim}Last fetch at ${new Date().toLocaleTimeString("en-US", { hour12: false })}...${colors.reset}`,
-			);
-		}
-
 		for await (const event of streamLogs(
 			client,
 			opts.logGroup,
@@ -582,15 +544,10 @@ async function main() {
 					console.log(formatted);
 				}
 
-				// Update the status line after showing the log
+				// Update the status line only if filter is active
 				if (interactiveFilter.isFilterActive()) {
 					process.stdout.write(
 						`${colors.gray}${colors.dim}filter: ${interactiveFilter.getFilterPattern()}${colors.reset}`,
-					);
-				} else {
-					const now = new Date().toLocaleTimeString("en-US", { hour12: false });
-					process.stdout.write(
-						`${colors.gray}${colors.dim}Last fetch at ${now}...${colors.reset}`,
 					);
 				}
 			} else {

@@ -1,6 +1,6 @@
 {
   "name": "awstail",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Stream CloudWatch Logs in (near) real-time with beautiful formatting",
   "main": "dist/index.js",
   "bin": {

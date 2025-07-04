@@ -1,33 +1,27 @@
-# awstail
+# AWSTail
 
 Stream CloudWatch Logs in (near) real-time with beautiful formatting.
-
-## Installation
-
-```bash
-npm install -g awstail
-```
 
 ## Usage
 
 ```bash
-awstail --log-group <log-group> [options]
+npx awstail --log-group <log-group> [options]
 ```
 
 ### Examples
 
 ```bash
 # Stream logs from a Lambda function
-awstail --log-group /aws/lambda/myFunction --profile my-profile --region us-east-1
+npx awstail --log-group /aws/lambda/myFunction --profile my-profile --region us-east-1
 
 # Filter for errors only
-awstail --log-group /aws/lambda/myFunction --filter "ERROR" --since 30m
+npx awstail --log-group /aws/lambda/myFunction --filter "ERROR" --since 30m
 
 # Continuously tail logs (like tail -f)
-awstail --log-group /aws/lambda/myFunction --tail --poll 2
+npx awstail --log-group /aws/lambda/myFunction --tail --poll 2
 
 # Get logs from the last hour
-awstail --log-group /aws/lambda/myFunction --since 1h
+npx awstail --log-group /aws/lambda/myFunction --since 1h
 ```
 
 ## Options

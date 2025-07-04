@@ -16,11 +16,13 @@
 import { cli } from "cleye";
 import { exit } from "node:process";
 import type {
-	CloudWatchLogsClient,
 	FilterLogEventsCommandInput,
 	FilteredLogEvent,
 } from "@aws-sdk/client-cloudwatch-logs";
-import { FilterLogEventsCommand } from "@aws-sdk/client-cloudwatch-logs";
+import {
+	CloudWatchLogsClient,
+	FilterLogEventsCommand,
+} from "@aws-sdk/client-cloudwatch-logs";
 
 const argv = cli({
 	name: "stream-logs",
@@ -363,11 +365,6 @@ async function main() {
 		startTime,
 		tail: argv.flags.tail,
 	};
-
-	// Import AWS SDK after setting profile
-	const { CloudWatchLogsClient } = await import(
-		"@aws-sdk/client-cloudwatch-logs"
-	);
 
 	const client = new CloudWatchLogsClient({ region: opts.region });
 

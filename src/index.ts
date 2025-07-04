@@ -15,6 +15,8 @@
  */
 import { cli } from "cleye";
 import { exit } from "node:process";
+import { createInterface } from "node:readline";
+import { stdin, stdout } from "node:process";
 import type {
 	FilterLogEventsCommandInput,
 	FilteredLogEvent,
@@ -77,6 +79,130 @@ interface Options {
 	pollMs: number;
 	startTime: number;
 	tail: boolean;
+}
+
+interface FilterState {
+	pattern: string;
+	isActive: boolean;
+}
+
+class InteractiveFilter {
+	private filterState: FilterState = { pattern: "", isActive: false };
+	private readline: any;
+
+	constructor() {
+		this.setupReadline();
+	}
+
+	private setupReadline() {
+		this.readline = createInterface({
+			input: stdin,
+			output: stdout,
+		});
+
+		// Enable raw mode to capture individual keystrokes
+		if (stdin.isTTY) {
+			stdin.setRawMode(true);
+		}
+
+		stdin.on("data", (key) => {
+			this.handleKeyPress(key);
+		});
+	}
+
+	private handleKeyPress(key: Buffer) {
+		const keyStr = key.toString();
+
+		// Handle special keys
+		if (keyStr === "\u0003") {
+			// Ctrl+C
+			this.cleanup();
+			process.exit(0);
+		} else if (keyStr === "\u007f" || keyStr === "\b") {
+			// Backspace
+			this.handleBackspace();
+		} else if (keyStr === "\u001b[3~") {
+			// Delete
+			this.handleDelete();
+		} else if (keyStr === "\u001b") {
+			// Escape
+			this.clearFilter();
+		} else if (keyStr.length === 1 && keyStr >= " " && keyStr <= "~") {
+			// Printable characters
+			this.addToFilter(keyStr);
+		}
+	}
+
+	private addToFilter(char: string) {
+		this.filterState.pattern += char;
+		this.filterState.isActive = true;
+		this.updateStatusLine();
+	}
+
+	private handleBackspace() {
+		if (this.filterState.pattern.length > 0) {
+			this.filterState.pattern = this.filterState.pattern.slice(0, -1);
+			if (this.filterState.pattern.length === 0) {
+				this.filterState.isActive = false;
+			}
+			this.updateStatusLine();
+		}
+	}
+
+	private handleDelete() {
+		// For now, same as backspace
+		this.handleBackspace();
+	}
+
+	private clearFilter() {
+		this.filterState.pattern = "";
+		this.filterState.isActive = false;
+		this.updateStatusLine();
+	}
+
+	private updateStatusLine() {
+		// Clear the current line and show the filter status
+		process.stdout.write("\r\x1b[K");
+		if (this.filterState.isActive) {
+			process.stdout.write(
+				`${colors.gray}${colors.dim}filter: ${this.filterState.pattern}${colors.reset}`,
+			);
+		} else {
+			const now = new Date().toLocaleTimeString("en-US", { hour12: false });
+			process.stdout.write(
+				`${colors.gray}${colors.dim}Last fetch at ${now}...${colors.reset}`,
+			);
+		}
+	}
+
+	shouldDimLine(message: string): boolean {
+		if (!this.filterState.isActive || this.filterState.pattern === "") {
+			return false;
+		}
+		return !message
+			.toLowerCase()
+			.includes(this.filterState.pattern.toLowerCase());
+	}
+
+	getDimmedLine(formatted: string): string {
+		// Apply super dim formatting - make it much less visible
+		return `${colors.gray}${colors.dim}${formatted.replace(/\x1b\[[0-9;]*m/g, "")}${colors.reset}`;
+	}
+
+	getFilterPattern(): string {
+		return this.filterState.pattern;
+	}
+
+	isFilterActive(): boolean {
+		return this.filterState.isActive;
+	}
+
+	cleanup() {
+		if (stdin.isTTY) {
+			stdin.setRawMode(false);
+		}
+		this.readline.close();
+	}
 }
 
 // ANSI color codes
@@ -290,18 +416,23 @@ async function* streamLogs(
 		pollMs,
 		startTime,
 	}: Pick<Options, "filterPattern" | "pollMs" | "startTime">,
+	interactiveFilter?: InteractiveFilter,
 ) {
 	let currentStartTime = startTime;
 
-	// Show initial status line
+	// Show initial status line only if not using interactive filter
 	const updateStatusLine = () => {
-		const now = new Date().toLocaleTimeString("en-US", { hour12: false });
-		process.stdout.write(
-			`\r${colors.gray}${colors.dim}Last fetch at ${now}...${colors.reset}`,
-		);
+		if (!interactiveFilter) {
+			const now = new Date().toLocaleTimeString("en-US", { hour12: false });
+			process.stdout.write(
+				`\r${colors.gray}${colors.dim}Last fetch at ${now}...${colors.reset}`,
+			);
+		}
 	};
 
-	updateStatusLine();
+	if (!interactiveFilter) {
+		updateStatusLine();
+	}
 
 	while (true) {
 		const params: FilterLogEventsCommandInput = {
@@ -315,8 +446,10 @@ async function* streamLogs(
 		const { events } = await client.send(new FilterLogEventsCommand(params));
 
 		if (events?.length) {
-			// Clear status line and show new logs
-			process.stdout.write("\r\x1b[K"); // Clear current line
+			if (!interactiveFilter) {
+				// Clear status line and show new logs (original behavior)
+				process.stdout.write("\r\x1b[K"); // Clear current line
+			}
 
 			// Update cursor before yielding to avoid missing records
 			currentStartTime = Math.max(...events.map((e) => e.timestamp ?? 0)) + 1;
@@ -324,10 +457,12 @@ async function* streamLogs(
 				yield event;
 			}
 
-			// Show status line again after logs
-			updateStatusLine();
-		} else {
-			// Just update the timestamp
+			if (!interactiveFilter) {
+				// Show status line again after logs (original behavior)
+				updateStatusLine();
+			}
+		} else if (!interactiveFilter) {
+			// Just update the timestamp (original behavior)
 			updateStatusLine();
 		}
 
@@ -368,6 +503,23 @@ async function main() {
 
 	const client = new CloudWatchLogsClient({ region: opts.region });
 
+	// Create interactive filter if in tail mode
+	let interactiveFilter: InteractiveFilter | undefined;
+	if (opts.tail) {
+		interactiveFilter = new InteractiveFilter();
+
+		// Set up cleanup on exit
+		process.on("SIGINT", () => {
+			interactiveFilter?.cleanup();
+			process.exit(0);
+		});
+
+		process.on("SIGTERM", () => {
+			interactiveFilter?.cleanup();
+			process.exit(0);
+		});
+	}
+
 	// First, fetch existing logs
 	const initialEvents = await fetchLogs(client, opts.logGroup, opts);
 
@@ -378,7 +530,11 @@ async function main() {
 	} else {
 		// Display initial events
 		for (const event of initialEvents) {
-			console.log(formatLogEntry(event.timestamp ?? 0, event.message ?? ""));
+			const formatted = formatLogEntry(
+				event.timestamp ?? 0,
+				event.message ?? "",
+			);
+			console.log(formatted);
 		}
 	}
 
@@ -389,11 +545,57 @@ async function main() {
 				? Math.max(...initialEvents.map((e) => e.timestamp ?? 0)) + 1
 				: Date.now();
 
-		for await (const event of streamLogs(client, opts.logGroup, {
-			...opts,
-			startTime: streamStartTime,
-		})) {
-			console.log(formatLogEntry(event.timestamp ?? 0, event.message ?? ""));
+		// Show initial status line
+		if (interactiveFilter) {
+			console.log(); // Add a blank line
+			process.stdout.write(
+				`${colors.gray}${colors.dim}Last fetch at ${new Date().toLocaleTimeString("en-US", { hour12: false })}...${colors.reset}`,
+			);
+		}
+
+		for await (const event of streamLogs(
+			client,
+			opts.logGroup,
+			{
+				...opts,
+				startTime: streamStartTime,
+			},
+			interactiveFilter,
+		)) {
+			const formatted = formatLogEntry(
+				event.timestamp ?? 0,
+				event.message ?? "",
+			);
+
+			if (interactiveFilter) {
+				// Clear the status line before showing the log
+				process.stdout.write("\r\x1b[K");
+
+				// Display the line with appropriate formatting
+				const shouldDim = interactiveFilter.shouldDimLine(event.message ?? "");
+
+				if (shouldDim) {
+					// Apply super dim formatting
+					const dimmed = interactiveFilter.getDimmedLine(formatted);
+					console.log(dimmed);
+				} else {
+					console.log(formatted);
+				}
+
+				// Update the status line after showing the log
+				if (interactiveFilter.isFilterActive()) {
+					process.stdout.write(
+						`${colors.gray}${colors.dim}filter: ${interactiveFilter.getFilterPattern()}${colors.reset}`,
+					);
+				} else {
+					const now = new Date().toLocaleTimeString("en-US", { hour12: false });
+					process.stdout.write(
+						`${colors.gray}${colors.dim}Last fetch at ${now}...${colors.reset}`,
+					);
+				}
+			} else {
+				console.log(formatted);
+			}
 		}
 	}
 }

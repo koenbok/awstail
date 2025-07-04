@@ -22,11 +22,11 @@
     "realtime",
     "monitoring"
   ],
-  "author": "Your Name <your.email@example.com>",
+  "author": "Koen Bok <koen@framer.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/awslog.git"
+    "url": "https://github.com/koenbok/awstail.git"
   },
   "engines": {
     "node": ">=18.0.0"

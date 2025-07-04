@@ -2,6 +2,8 @@
 
 Stream CloudWatch Logs in (near) real-time with beautiful formatting.
 
+<img width="1128" alt="image" src="https://github.com/user-attachments/assets/aab9bec8-3ec4-4dc3-8cb0-72b7f4ca1024" />
+
 ## Usage
 
 ```bash

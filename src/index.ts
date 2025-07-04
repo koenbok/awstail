@@ -18,6 +18,7 @@ import { exit } from "node:process";
 import type {
 	CloudWatchLogsClient,
 	FilterLogEventsCommandInput,
+	FilteredLogEvent,
 } from "@aws-sdk/client-cloudwatch-logs";
 import { FilterLogEventsCommand } from "@aws-sdk/client-cloudwatch-logs";
 
@@ -26,7 +27,7 @@ const argv = cli({
 	help: {
 		description: "Stream CloudWatch Logs in (near) real-time.",
 		usage: [
-			"npx tsx src/index.ts --log-group <log-group> [--profile <aws-profile>] [--filter <pattern>] [--region <aws-region>] [--poll <seconds>] [--since <time>]",
+			"npx tsx src/index.ts --log-group <log-group> [--profile <aws-profile>] [--filter <pattern>] [--region <aws-region>] [--poll <seconds>] [--since <time>] [--tail]",
 		],
 	},
 	flags: {
@@ -56,6 +57,13 @@ const argv = cli({
 		since: {
 			type: String,
 			description: "Start time relative to now (e.g. 10s, 22m, 2h, 1d)",
+			default: "10m",
+		},
+		tail: {
+			type: Boolean,
+			description:
+				"Stream logs continuously (default: false, fetch once and exit)",
+			default: false,
 		},
 	},
 });
@@ -66,6 +74,7 @@ interface Options {
 	filterPattern?: string;
 	pollMs: number;
 	startTime: number;
+	tail: boolean;
 }
 
 // ANSI color codes
@@ -239,8 +248,39 @@ function formatLogEntry(timestamp: number, message: string): string {
 	return `${colors.gray}${localTime}${colors.reset} ${requestIdColor}${requestId}${colors.reset} ${logLevelColor}${logLevel}${colors.reset} ${colors.dim}${highlightedMessage}${colors.reset}`;
 }
 
-/** Async generator that yields new log events as they arrive. */
-async function* tailLogGroup(
+/** Fetch logs once from CloudWatch */
+async function fetchLogs(
+	client: CloudWatchLogsClient,
+	logGroupName: string,
+	{ filterPattern, startTime }: Pick<Options, "filterPattern" | "startTime">,
+): Promise<FilteredLogEvent[]> {
+	const params: FilterLogEventsCommandInput = {
+		logGroupName,
+		interleaved: true,
+		startTime,
+		filterPattern,
+		limit: 10_000,
+	};
+
+	const events: FilteredLogEvent[] = [];
+	let nextToken: string | undefined;
+
+	// Fetch all available events
+	do {
+		const response = await client.send(
+			new FilterLogEventsCommand({ ...params, nextToken }),
+		);
+		if (response.events?.length) {
+			events.push(...response.events);
+		}
+		nextToken = response.nextToken;
+	} while (nextToken);
+
+	return events;
+}
+
+/** Stream new logs continuously */
+async function* streamLogs(
 	client: CloudWatchLogsClient,
 	logGroupName: string,
 	{
@@ -249,7 +289,6 @@ async function* tailLogGroup(
 		startTime,
 	}: Pick<Options, "filterPattern" | "pollMs" | "startTime">,
 ) {
-	let nextToken: string | undefined;
 	let currentStartTime = startTime;
 
 	while (true) {
@@ -257,19 +296,20 @@ async function* tailLogGroup(
 			logGroupName,
 			interleaved: true,
 			startTime: currentStartTime,
-			nextToken,
 			filterPattern,
 			limit: 10_000,
 		};
-		const { events, nextToken: newToken } = await client.send(
-			new FilterLogEventsCommand(params),
-		);
+
+		const { events } = await client.send(new FilterLogEventsCommand(params));
+
 		if (events?.length) {
-			// update cursor before yielding to avoid missing records if the loop is slow
+			// Update cursor before yielding to avoid missing records
 			currentStartTime = Math.max(...events.map((e) => e.timestamp ?? 0)) + 1;
-			for (const e of events) yield e;
+			for (const event of events) {
+				yield event;
+			}
 		}
-		nextToken = newToken;
+
 		await new Promise((r) => setTimeout(r, pollMs));
 	}
 }
@@ -286,16 +326,14 @@ async function main() {
 		exit(1);
 	}
 
-	// Parse since time if provided
-	let startTime = Date.now(); // default to now
-	if (argv.flags.since) {
-		try {
-			const sinceMs = parseTimeFormat(argv.flags.since);
-			startTime = Date.now() - sinceMs;
-		} catch (error) {
-			console.error(`Error parsing --since: ${error.message}`);
-			exit(1);
-		}
+	// Parse since time (now has default of "10m")
+	let startTime: number;
+	try {
+		const sinceMs = parseTimeFormat(argv.flags.since);
+		startTime = Date.now() - sinceMs;
+	} catch (error) {
+		console.error(`Error parsing --since: ${error.message}`);
+		exit(1);
 	}
 
 	const opts: Options = {
@@ -304,6 +342,7 @@ async function main() {
 		filterPattern: argv.flags.filter,
 		pollMs: argv.flags.poll * 1000, // Convert seconds to milliseconds
 		startTime,
+		tail: argv.flags.tail,
 	};
 
 	// Import AWS SDK after setting profile
@@ -313,8 +352,39 @@ async function main() {
 
 	const client = new CloudWatchLogsClient({ region: opts.region });
 
-	for await (const event of tailLogGroup(client, opts.logGroup, opts)) {
-		console.log(formatLogEntry(event.timestamp ?? 0, event.message ?? ""));
+	// First, fetch existing logs
+	const initialEvents = await fetchLogs(client, opts.logGroup, opts);
+
+	if (initialEvents.length === 0) {
+		if (opts.tail) {
+			console.log(
+				`${colors.dim}No logs found in the last ${argv.flags.since}, waiting for new logs...${colors.reset}`,
+			);
+		} else {
+			console.log(
+				`${colors.dim}No logs found in the last ${argv.flags.since}${colors.reset}`,
+			);
+		}
+	} else {
+		// Display initial events
+		for (const event of initialEvents) {
+			console.log(formatLogEntry(event.timestamp ?? 0, event.message ?? ""));
+		}
+	}
+
+	// If tailing, continue streaming from current time
+	if (opts.tail) {
+		const streamStartTime =
+			initialEvents.length > 0
+				? Math.max(...initialEvents.map((e) => e.timestamp ?? 0)) + 1
+				: Date.now();
+
+		for await (const event of streamLogs(client, opts.logGroup, {
+			...opts,
+			startTime: streamStartTime,
+		})) {
+			console.log(formatLogEntry(event.timestamp ?? 0, event.message ?? ""));
+		}
 	}
 }
 

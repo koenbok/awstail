@@ -15,7 +15,8 @@
  */
 import { cli } from "cleye";
 import { exit } from "node:process";
-import { createInterface, Interface } from "node:readline";
+import { createInterface } from "node:readline";
+import type { Interface } from "node:readline";
 import { stdin, stdout } from "node:process";
 import type {
 	FilterLogEventsCommandInput,
@@ -86,9 +87,17 @@ interface FilterState {
 	isActive: boolean;
 }
 
+interface LogLine {
+	timestamp: number;
+	message: string;
+	formatted: string;
+}
+
 class InteractiveFilter {
 	private filterState: FilterState = { pattern: "", isActive: false };
 	private readline: Interface;
+	private lineBuffer: LogLine[] = [];
+	private maxBufferSize = 50; // Keep last 50 lines for re-rendering
 
 	constructor() {
 		this.setupReadline();
@@ -134,8 +143,16 @@ class InteractiveFilter {
 	}
 
 	private addToFilter(char: string) {
+		const wasActive = this.filterState.isActive;
 		this.filterState.pattern += char;
 		this.filterState.isActive = true;
+
+		// If this is the first character, re-render all existing lines
+		if (!wasActive) {
+			this.rerenderAllLines();
+		} else {
+			this.updateFilteredLines();
+		}
 		this.updateStatusLine();
 	}
 
@@ -144,6 +161,9 @@ class InteractiveFilter {
 			this.filterState.pattern = this.filterState.pattern.slice(0, -1);
 			if (this.filterState.pattern.length === 0) {
 				this.filterState.isActive = false;
+				this.rerenderAllLines(); // Re-render to remove dimming
+			} else {
+				this.updateFilteredLines();
 			}
 			this.updateStatusLine();
 		}
@@ -155,9 +175,37 @@ class InteractiveFilter {
 	}
 
 	private clearFilter() {
+		const wasActive = this.filterState.isActive;
 		this.filterState.pattern = "";
 		this.filterState.isActive = false;
+
+		// Re-render all lines to remove dimming
+		if (wasActive) {
+			this.rerenderAllLines();
+		}
 		this.updateStatusLine();
+	}
+
+	private rerenderAllLines() {
+		if (this.lineBuffer.length === 0) return;
+
+		// Move cursor up to the start of our buffer
+		process.stdout.write(`\u001b[${this.lineBuffer.length + 1}A`);
+
+		// Clear and re-render each line
+		for (const line of this.lineBuffer) {
+			process.stdout.write("\r\x1b[K"); // Clear line
+			const shouldDim = this.shouldDimLine(line.message);
+			const displayLine = shouldDim
+				? this.getDimmedLine(line.formatted)
+				: line.formatted;
+			console.log(displayLine);
+		}
+	}
+
+	private updateFilteredLines() {
+		// For pattern changes, just re-render all lines
+		this.rerenderAllLines();
 	}
 
 	private updateStatusLine() {
@@ -168,7 +216,16 @@ class InteractiveFilter {
 				`${colors.gray}${colors.dim}filter: ${this.filterState.pattern}${colors.reset}`,
 			);
 		}
-		// Don't show "Last fetch at" line anymore - it's too noisy
+	}
+
+	addLogLine(timestamp: number, message: string, formatted: string) {
+		const logLine: LogLine = { timestamp, message, formatted };
+		this.lineBuffer.push(logLine);
+
+		// Keep buffer size manageable
+		if (this.lineBuffer.length > this.maxBufferSize) {
+			this.lineBuffer.shift();
+		}
 	}
 
 	shouldDimLine(message: string): boolean {
@@ -183,7 +240,9 @@ class InteractiveFilter {
 	getDimmedLine(formatted: string): string {
 		// Apply super dim formatting - make it much less visible
 		// Strip ANSI escape codes and apply dim formatting
-		const stripped = formatted.replace(/\u001b\[[0-9;]*m/g, "");
+		// Use a safer regex pattern to avoid control character warning
+		const ansiRegex = /\u001b\[[0-9;]*m/g;
+		const stripped = formatted.replace(ansiRegex, "");
 		return `${colors.gray}${colors.dim}${stripped}${colors.reset}`;
 	}
 
@@ -505,6 +564,15 @@ async function main() {
 				event.message ?? "",
 			);
 			console.log(formatted);
+
+			// Add to interactive filter buffer if in tail mode
+			if (interactiveFilter) {
+				interactiveFilter.addLogLine(
+					event.timestamp ?? 0,
+					event.message ?? "",
+					formatted,
+				);
+			}
 		}
 	}
 
@@ -530,19 +598,22 @@ async function main() {
 			);
 
 			if (interactiveFilter) {
+				// Add to buffer first
+				interactiveFilter.addLogLine(
+					event.timestamp ?? 0,
+					event.message ?? "",
+					formatted,
+				);
+
 				// Clear the status line before showing the log
 				process.stdout.write("\r\x1b[K");
 
 				// Display the line with appropriate formatting
 				const shouldDim = interactiveFilter.shouldDimLine(event.message ?? "");
-
-				if (shouldDim) {
-					// Apply super dim formatting
-					const dimmed = interactiveFilter.getDimmedLine(formatted);
-					console.log(dimmed);
-				} else {
-					console.log(formatted);
-				}
+				const displayLine = shouldDim
+					? interactiveFilter.getDimmedLine(formatted)
+					: formatted;
+				console.log(displayLine);
 
 				// Update the status line only if filter is active
 				if (interactiveFilter.isFilterActive()) {

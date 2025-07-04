@@ -291,6 +291,16 @@ async function* streamLogs(
 ) {
 	let currentStartTime = startTime;
 
+	// Show initial status line
+	const updateStatusLine = () => {
+		const now = new Date().toLocaleTimeString("en-US", { hour12: false });
+		process.stdout.write(
+			`\r${colors.gray}${colors.dim}Last fetch at ${now}...${colors.reset}`,
+		);
+	};
+
+	updateStatusLine();
+
 	while (true) {
 		const params: FilterLogEventsCommandInput = {
 			logGroupName,
@@ -303,11 +313,20 @@ async function* streamLogs(
 		const { events } = await client.send(new FilterLogEventsCommand(params));
 
 		if (events?.length) {
+			// Clear status line and show new logs
+			process.stdout.write("\r\x1b[K"); // Clear current line
+
 			// Update cursor before yielding to avoid missing records
 			currentStartTime = Math.max(...events.map((e) => e.timestamp ?? 0)) + 1;
 			for (const event of events) {
 				yield event;
 			}
+
+			// Show status line again after logs
+			updateStatusLine();
+		} else {
+			// Just update the timestamp
+			updateStatusLine();
 		}
 
 		await new Promise((r) => setTimeout(r, pollMs));
@@ -356,15 +375,9 @@ async function main() {
 	const initialEvents = await fetchLogs(client, opts.logGroup, opts);
 
 	if (initialEvents.length === 0) {
-		if (opts.tail) {
-			console.log(
-				`${colors.dim}No logs found in the last ${argv.flags.since}, waiting for new logs...${colors.reset}`,
-			);
-		} else {
-			console.log(
-				`${colors.dim}No logs found in the last ${argv.flags.since}${colors.reset}`,
-			);
-		}
+		console.log(
+			`${colors.dim}No logs found in the last ${argv.flags.since}${colors.reset}`,
+		);
 	} else {
 		// Display initial events
 		for (const event of initialEvents) {
